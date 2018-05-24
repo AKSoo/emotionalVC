@@ -1,0 +1,7 @@
+{
+    "fs": 22050,
+    "fft_size": 1024,
+    "f0_ceil": 700.0,
+    "f0_floor": 71.0,
+    "frame_period": 5.0
+}
