@@ -1,0 +1,4 @@
+tensorflow
+soundfile
+librosa
+pyworld
