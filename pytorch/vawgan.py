@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 from math import ceil
 
-
 def _sanity_check(outputs, kernels, strides):
     assert len(outputs) == len(kernels) == len(strides) > 2
 
@@ -30,6 +29,7 @@ def convblock(c_in, c_out, kernel, stride, pad=True, L=0, transpose=False,
     return nn.Sequential(*layers)
 
 
+## MODEL ##
 class Encoder(nn.Module):
     '''
     len_in, z_dim: int
@@ -64,13 +64,13 @@ class Encoder(nn.Module):
 
 class Generator(nn.Module):
     '''
-    z_dim, y_dim, merge_dim, init_c, init_l: int
+    len_out, z_dim, y_dim, merge_dim, init_c: int
     outputs, kernels, strides: list of int
 
     IN: tensor (batch, z_dim), condition tensor (batch,)
     OUT: tensor (batch, len_out)
     '''
-    def __init__(self, z_dim, y_dim, merge_dim, init_l, init_c,
+    def __init__(self, len_out, z_dim, y_dim, merge_dim, init_c,
                  outputs, kernels, strides):
         super().__init__()
         _sanity_check(outputs, kernels, strides)
@@ -80,10 +80,15 @@ class Generator(nn.Module):
         self.fc_z = nn.Linear(z_dim, merge_dim)
 
         # init reshape
-        self.init_l, self.init_c = init_l, init_c
+        self.init_l = len_out
+        for s in strides:
+            self.init_l //= s
+
+        self.init_c = init_c
         self.fc_reshape = nn.Sequential(
-            nn.Linear(2*merge_dim, init_l * init_c),
-            nn.LeakyReLU(inplace=True), nn.BatchNorm1d(init_l * init_c)
+            nn.Linear(2*merge_dim, self.init_l * self.init_c),
+            nn.LeakyReLU(inplace=True),
+            nn.BatchNorm1d(self.init_l * self.init_c)
         )
 
         # transpose convs
@@ -127,13 +132,10 @@ class Discriminator(nn.Module):
         # convs
         blocks = []
         cur_len, cur_out = len_in, 2
-        batchnorm = False # no batchnorm for input block
         for o, k, s in zip(outputs, kernels, strides):
-            blocks.append(convblock(cur_out, o, k, s, L=cur_len, batchnorm=batchnorm))
+            # no batchnorm for WGAN-GP
+            blocks.append(convblock(cur_out, o, k, s, L=cur_len, batchnorm=False))
             cur_len, cur_out = ceil(cur_len / s), o
-            print(cur_len, cur_out)
-            if not batchnorm:
-                batchnorm = True
 
         self.blocks = nn.Sequential(*blocks)
 
@@ -150,3 +152,51 @@ class Discriminator(nn.Module):
         out = out.view(x.shape[0], -1) # N, L*C
         out = self.fc_score(out) # N, 1
         return out.squeeze(1)
+
+
+## VAE ##
+def reparameterize(mean, logvar):
+    std = torch.exp(0.5 * logvar)
+    eps = torch.randn_like(std)
+    return mean + eps * std
+
+def forward_VAE(E, G, x, cond):
+    '''
+    VAE forward pass
+
+    E: Encoder
+    G: Generator
+    x: FloatTensor (batch, L)
+    cond: LongTensor (batch,)
+
+    Returns: xh FloatTensor (batch, L)
+        (mean, logvar) of z
+    '''
+    mean, logvar = E(x)
+    z = reparameterize(mean, logvar)
+    xh = G(z, cond)
+    return xh, (mean, logvar)
+
+
+## LOSS FUNCTIONS ##
+def recon_loss(real, fake):
+    return nn.functional.mse_loss(fake, real)
+
+def kld_loss(mean, logvar):
+    var = logvar.exp()
+    return 0.5 * torch.mean(var + mean.pow(2) - logvar - 1)
+
+def wgan_loss(D, real, fake, cond):
+    return torch.mean(D(real, cond) - D(fake, cond))
+
+def gradient_penalty(D, real, fake, cond):
+    # random point between real, fake
+    a = torch.rand_like(real[:, 0]).unsqueeze(1)
+    interpolates = (a * real.data + (1-a) * fake.data).requires_grad_(True)
+    d_interpolates = D(interpolates, cond.data)
+
+    init = torch.ones_like(d_interpolates)
+    grads = torch.autograd.grad(d_interpolates, interpolates, grad_outputs=init,
+                                create_graph=True, retain_graph=True)[0]
+    gp = ((grads.norm(2, dim=1) - 1) ** 2).mean()
+    return gp
