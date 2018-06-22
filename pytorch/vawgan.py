@@ -9,7 +9,7 @@ def _sanity_check(outputs, kernels, strides):
     assert len(outputs) == len(kernels) == len(strides) > 2
 
 def convblock(c_in, c_out, kernel, stride, pad=True, L=0, transpose=False,
-              activation=nn.LeakyReLU(inplace=True), batchnorm=True):
+              activation=nn.LeakyReLU(), batchnorm=True):
     if pad:
         # tensorflow SAME padding
         need = -L % stride + kernel - stride
@@ -87,7 +87,7 @@ class Generator(nn.Module):
         self.init_c = init_c
         self.fc_reshape = nn.Sequential(
             nn.Linear(2*merge_dim, self.init_l * self.init_c),
-            nn.LeakyReLU(inplace=True),
+            nn.LeakyReLU(),
             nn.BatchNorm1d(self.init_l * self.init_c)
         )
 
@@ -105,7 +105,7 @@ class Generator(nn.Module):
 
     def forward(self, z, condition):
         out = torch.cat([self.fc_z(z), self.y(condition)], 1)
-        out = nn.functional.leaky_relu(out, inplace=True)
+        out = nn.functional.leaky_relu(out)
 
         out = self.fc_reshape(out) # N, L*C
         out = out.view(-1, self.init_c, self.init_l) # N, C, L

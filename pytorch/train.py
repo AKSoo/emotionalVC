@@ -147,7 +147,7 @@ def main(architecture, corpus, device=0, logdir='logdir', **kwargs):
     torch.save(E.state_dict(), os.path.join(logdir, 'VAWGAN_encoder.pth'))
     torch.save(G.state_dict(), os.path.join(logdir, 'VAWGAN_generator.pth'))
     torch.save(D.state_dict(), os.path.join(logdir, 'VAWGAN_discriminator.pth'))
-    print('Saved VAWGAN to ' + logdir + '\n')
+    print('Saved VAWGAN to ' + logdir)
 
 
 if __name__ == '__main__':
