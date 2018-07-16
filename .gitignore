@@ -6,6 +6,7 @@ test*.*
 
 .env
 dataset
+etc
 save
 output
 *.ipynb*
