@@ -2,4 +2,3 @@ python3 analyzer.py --dir_to_wav dataset/savee/wav --dir_to_bin dataset/savee/bi
 python3 build.py --train_file_pattern "dataset/savee/bin/Training Set/*/*.bin" --corpus_name savee
 python3 main-vawgan.py --corpus_name savee
 python3 convert-vawgan.py --corpus_name savee --src SNeu --trg THap --module model.vawgan --model VAWGAN --checkpoint logdir/train/0516-1755-42-2018/model.ckpt-62480 --file_pattern "./dataset/savee/bin/Training Set/{}/*.bin"
-

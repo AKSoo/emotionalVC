@@ -1,131 +1,90 @@
-import json
-import os
-
-import tensorflow as tf
+import argparse, os, glob, json
 import numpy as np
-import soundfile as sf
+import torch
 
-from util.wrapper import load
-from analyzer import read_whole_features, pw2wav
-from analyzer import Tanhize
-from datetime import datetime
-from importlib import import_module
+from analyzer import pw2wav
+import soundfile
 
-args = tf.app.flags.FLAGS
-tf.app.flags.DEFINE_string('corpus_name', 'vcc2016', 'Corpus name')
-tf.app.flags.DEFINE_string('checkpoint', None, 'root of log dir')
-tf.app.flags.DEFINE_string('src', 'SF1', 'source speaker [SF1 - SM2]')
-tf.app.flags.DEFINE_string('trg', 'TM3', 'target speaker [SF1 - TM3]')
-tf.app.flags.DEFINE_string('output_dir', './logdir', 'root of output dir')
-tf.app.flags.DEFINE_string('module', 'model.vae', 'Module')
-tf.app.flags.DEFINE_string('model', None, 'Model')
-tf.app.flags.DEFINE_string('file_pattern', './dataset/vcc2016/bin/Testing Set/{}/*.bin', 'file pattern')
-tf.app.flags.DEFINE_string(
-    'speaker_list', './etc/speakers.tsv', 'Speaker list (one speaker per line)'
-)
-
-if args.model is None:
-    raise ValueError(
-        '\n  You MUST specify `model`.' +\
-        '\n    Use `python convert.py --help` to see applicable options.'
-    )
-
-module = import_module(args.module, package=None)
-MODEL = getattr(module, args.model)
-
-FS = 16000
-
-with open(args.speaker_list) as fp:
-    SPEAKERS = [l.strip() for l in fp.readlines()]
-
-def make_output_wav_name(output_dir, filename):
-    basename = str(filename, 'utf8')
-    basename = os.path.split(basename)[-1]
-    basename = os.path.splitext(basename)[0]
-    # print('Processing {}'.format(basename))        
-    return os.path.join(
-        output_dir, 
-        '{}-{}-{}.wav'.format(args.src, args.trg, basename)
-    )
-
-def get_default_output(logdir_root):
-    STARTED_DATESTRING = datetime.now().strftime('%0m%0d-%0H%0M-%0S-%Y')
-    logdir = os.path.join(logdir_root, 'output', STARTED_DATESTRING)
-    print('Using default logdir: {}'.format(logdir))        
-    return logdir
-
-def convert_f0(f0, src, trg):
-    mu_s, std_s = np.fromfile(os.path.join('./etc', '{}.npf'.format(src)), np.float32)
-    mu_t, std_t = np.fromfile(os.path.join('./etc', '{}.npf'.format(trg)), np.float32)
-    lf0 = tf.where(f0 > 1., tf.log(f0), f0)
-    lf0 = tf.where(lf0 > 1., (lf0 - mu_s)/std_s * std_t + mu_t, lf0)
-    lf0 = tf.where(lf0 > 1., tf.exp(lf0), lf0)
-    return lf0
+import data_utils as util
+from vawgan import Encoder, Generator, forward_VAE
 
 
-def nh_to_nchw(x):
-    with tf.name_scope('NH_to_NCHW'):
-        x = tf.expand_dims(x, 1)      # [b, h] => [b, c=1, h]
-        return tf.expand_dims(x, -1)  # => [b, c=1, h, w=1]
+def main(architecture, corpus, tgt, load_dir='save',
+         src_path=None, out_dir='output', device=0, **kwargs):
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
 
+    with open(architecture) as f:
+        arch = json.load(f)
 
-def main():
-    logdir, ckpt = os.path.split(args.checkpoint)
-    arch = tf.gfile.Glob(os.path.join(logdir, 'architecture*.json'))[0]  # should only be 1 file
-    with open(arch) as fp:
-        arch = json.load(fp)
+    emotions = util.emotion_list()
 
-    normalizer = Tanhize(
-        xmax=np.fromfile('./etc/{}_xmax.npf'.format(args.corpus_name)),
-        xmin=np.fromfile('./etc/{}_xmin.npf'.format(args.corpus_name)),
-    )
+    # input params
+    if src_path is None:
+        src_path = arch['training']['src_dir']
+    src_files = sorted(glob.glob(src_path))
+    normalizer = util.Tanhize(corpus)
+    batch_size = arch['training']['batch_size']
 
-    features = read_whole_features(args.file_pattern.format(args.src))
+    # load models
+    length = arch['hwc'][0]
+    z_dim, y_dim = arch['z_dim'], arch['y_dim']
+    archE = arch['encoder']
+    archG = arch['generator']
 
-    x = normalizer.forward_process(features['sp'])
-    x = nh_to_nchw(x)
-    y_s = features['speaker']
-    y_t_id = tf.placeholder(dtype=tf.int64, shape=[1,])
-    y_t = y_t_id * tf.ones(shape=[tf.shape(x)[0],], dtype=tf.int64)
+    E = Encoder(length, z_dim,
+                archE['output'], archE['kernel'], archE['stride'])
+    G = Generator(length, z_dim, y_dim, archG['merge_dim'], archG['init_out'],
+                  archG['output'], archG['kernel'], archG['stride'])
+    E.load_state_dict(torch.load(os.path.join(load_dir, 'VAWGAN_encoder.pth')))
+    G.load_state_dict(torch.load(os.path.join(load_dir, 'VAWGAN_generator.pth')))
 
-    machine = MODEL(arch)
-    z = machine.encode(x)
-    x_t = machine.decode(z, y_t)  # NOTE: the API yields NHWC format
-    x_t = tf.squeeze(x_t)
-    x_t = normalizer.backward_process(x_t)
+    E.eval()
+    G.eval()
 
-    # For sanity check (validation)
-    x_s = machine.decode(z, y_s)
-    x_s = tf.squeeze(x_s)
-    x_s = normalizer.backward_process(x_s)
+    # GPU?
+    if device >= 0:
+        E.cuda(device)
+        G.cuda(device)
 
-    f0_s = features['f0']
-    f0_t = convert_f0(f0_s, args.src, args.trg)
+    # VAE on each file
+    for f in src_files:
+        print('Processing {}'.format(f))
+        loader = util.load_single(f, normalizer, batch_size=batch_size)
+        outputs = []
 
-    output_dir = get_default_output(args.output_dir)
+        for load in loader:
+            s_x, s_cond = util.load_to_vars(load, device)
+            t_cond = torch.full_like(s_cond, emotions.index(tgt))
 
-    saver = tf.train.Saver()
-    sv = tf.train.Supervisor(logdir=output_dir)
-    with sv.managed_session() as sess:
-        load(saver, sess, logdir, ckpt=ckpt)
-        while True:
-            # counter = 1
-            try:
-                feat, f0, sp = sess.run(
-                    [features, f0_t, x_t],
-                    feed_dict={y_t_id: np.asarray([SPEAKERS.index(args.trg)])}
-                )
-                feat.update({'sp': sp, 'f0': f0})
-                y = pw2wav(feat)
-                oFilename = make_output_wav_name(output_dir, feat['filename'])
-                print('\rProcessing {}'.format(oFilename), end='')
-                sf.write(oFilename, y, FS)
-                # counter += 1
-            except:
-                break
-            finally:
-                pass
-        print()
+            t_xh, _ = forward_VAE(E, G, s_x, t_cond)
+            outputs.append(t_xh.cpu().data.numpy())
+
+        src = emotions[s_cond[0].item()]
+        sp = np.concatenate(outputs)
+
+        # compile to wav
+        _, ap, f0, en, _ = util.get_features(f)
+        f0 = util.convert_f0(f0, src, tgt)
+
+        feat = np.concatenate([sp, ap, f0[:, np.newaxis], en[:, np.newaxis]], axis=1)
+        y = pw2wav(feat)
+
+        # save
+        name = os.path.splitext(os.path.basename(f))[0]
+        out_file = os.path.join(out_dir, '{}-{}-{}.wav'.format(src, tgt, name))
+        soundfile.write(out_file, y, 22050)
+
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('architecture', type=str, help='json architecture file')
+    parser.add_argument('corpus', type=str, help='dataset name')
+    parser.add_argument('tgt', type=str, help='target emotion')
+    parser.add_argument('--load_dir', type=str, help='trained model directory')
+    parser.add_argument('--src_path', type=str, help='source path (default from json)')
+    parser.add_argument('--out_dir', type=str, help='output directory')
+    parser.add_argument('--device', type=int, help='-1: cpu, 0+: gpu')
+
+    args = {k:v for k,v in vars(parser.parse_args()).items() if v is not None}
+    main(**args)

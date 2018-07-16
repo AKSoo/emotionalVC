@@ -24,12 +24,12 @@
         "l2-reg": 1e-6
     },
     "training": {
-        "src_dir": "./dataset/savee/bin/*/SNeu/*.bin",
-        "trg_dir": "./dataset/savee/bin/*/THap/*.bin",
+        "src_dir": "./dataset/savee/bin/SNeu/*.bin",
+        "tgt_dir": "./dataset/savee/bin/THap/*.bin",
         "batch_size": 128,
         "lr": 1e-4,
         "epoch_vae": 10,
-        "epoch_vawgan": 30,
+        "epoch_vawgan": 90,
         "gamma": 50,
         "n_unroll": 5,
         "n_unroll_intense": 100

@@ -2,3 +2,4 @@ tensorflow
 soundfile
 librosa
 pyworld
+torch

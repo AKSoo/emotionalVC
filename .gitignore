@@ -1,7 +1,11 @@
-logdir
-test*.*
 __pycache__
 __init__.py
+
 .vscode
+test*.*
+
 .env
+dataset
+save
+output
 *.ipynb*
